@@ -1,0 +1,32 @@
+services:
+  app:
+    build:
+      context: ./{{ config.backend_app_path }}
+      dockerfile: Dockerfile
+    ports:
+      - "{{ config.ecs.container_port }}:{{ config.ecs.container_port }}"
+    env_file:
+      - .env
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+{% if config.include_ecs %}
+      - PATH_BASE={{ config.path_base_pattern }}
+{% endif %}
+{% if config.include_rds %}
+    depends_on:
+      - db
+
+  db:
+    image: postgres:{{ config.rds.postgres_version }}-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: {{ config.rds.database_name }}
+      POSTGRES_USER: {{ config.rds.username }}
+      POSTGRES_PASSWORD: localdev
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
+{% endif %}

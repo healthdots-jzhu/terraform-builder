@@ -1,0 +1,56 @@
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/*.tfplan
+terraform/.terraform.lock.hcl
+terraform/terraform.tfvars
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+{% if config.backend_framework.value == "dotnet" %}
+# .NET
+**/bin/
+**/obj/
+*.user
+*.suo
+{% endif %}
+{% if config.backend_framework.value == "nodejs" %}
+# Node.js
+node_modules/
+dist/
+{% endif %}
+{% if config.backend_framework.value == "python" %}
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+{% endif %}
+{% if config.backend_framework.value == "go" %}
+# Go
+vendor/
+{% endif %}
+{% if config.include_frontend %}
+# Frontend
+{{ config.frontend_path }}/node_modules/
+{{ config.frontend_path }}/dist/
+{% endif %}
+
+# Logs
+logs/
+*.log

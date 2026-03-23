@@ -1,0 +1,218 @@
+name: '[On-Demand] Destroy Infrastructure (Preserve RDS + Networking)'
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment to destroy'
+        required: true
+        default: '{{ config.environments[0] | default("beta") }}'
+        type: choice
+        options:
+{% for env in config.environments %}
+          - {{ env }}
+{% endfor %}
+      confirm:
+        description: 'Type the environment name to confirm destruction'
+        required: true
+        default: ''
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: {{ config.aws_region }}
+  ENVIRONMENT: {% raw %}${{ github.event.inputs.environment }}{% endraw %}
+
+jobs:
+  destroy:
+    name: Terraform destroy (preserves RDS, VPC, subnets, SGs, ECR, KMS)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    environment: {% raw %}${{ github.event.inputs.environment }}{% endraw %}
+
+    steps:
+      - name: Validate confirmation input
+        run: |
+          if [ "{% raw %}${{ github.event.inputs.confirm }}{% endraw %}" != "{% raw %}${{ github.event.inputs.environment }}{% endraw %}" ]; then
+            echo "ERROR: Confirmation does not match environment."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v5.1.1
+        with:
+          role-to-assume: {% raw %}${{ secrets.CI_AWS_ROLE_ARN }}{% endraw %}
+          aws-region: {% raw %}${{ env.AWS_REGION }}{% endraw %}
+          audience: sts.amazonaws.com
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: "1.14.3"
+
+      - name: Export GitHub variables to TF_VAR_*
+        shell: bash
+        run: |
+          echo "TF_VAR_environment={% raw %}${{ env.ENVIRONMENT }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_aws_region={% raw %}${{ vars.AWS_REGION }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_project_name={% raw %}${{ vars.PROJECT_NAME }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_vpc_cidr={% raw %}${{ vars.VPC_CIDR }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_public_subnet_cidr={% raw %}${{ vars.PUBLIC_SUBNET_CIDR }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_public_2b_cidr={% raw %}${{ vars.PUBLIC_2B_CIDR }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_private_subnet_cidr={% raw %}${{ vars.PRIVATE_SUBNET_CIDR }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_private_2a_cidr={% raw %}${{ vars.PRIVATE_2A_CIDR }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_private_2b_cidr={% raw %}${{ vars.PRIVATE_2B_CIDR }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_private_app_2a_cidr={% raw %}${{ vars.PRIVATE_APP_2A_CIDR }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_private_app_2b_cidr={% raw %}${{ vars.PRIVATE_APP_2B_CIDR }}{% endraw %}" >> $GITHUB_ENV
+{% if config.include_s3_frontend %}
+          echo "TF_VAR_s3_bucket_frontend={% raw %}${{ vars.S3_BUCKET_FRONTEND }}{% endraw %}" >> $GITHUB_ENV
+{% endif %}
+{% if config.include_rds %}
+          echo "TF_VAR_rds_instance_class={% raw %}${{ vars.RDS_INSTANCE_CLASS }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_rds_allocated_storage={% raw %}${{ vars.RDS_ALLOCATED_STORAGE }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_postgres_version={% raw %}${{ vars.POSTGRES_VERSION }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_rds_database_name={% raw %}${{ vars.RDS_DATABASE_NAME }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_rds_username={% raw %}${{ vars.RDS_USERNAME }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_rds_storage_type={% raw %}${{ vars.RDS_STORAGE_TYPE }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_rds_skip_final_snapshot={% raw %}${{ vars.RDS_SKIP_FINAL_SNAPSHOT }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_rds_backup_retention_period={% raw %}${{ vars.RDS_BACKUP_RETENTION_PERIOD }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_rds_multi_az={% raw %}${{ vars.RDS_MULTI_AZ }}{% endraw %}" >> $GITHUB_ENV
+{% endif %}
+{% if config.include_ecs %}
+          echo "TF_VAR_ecs_task_cpu={% raw %}${{ vars.ECS_TASK_CPU }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_ecs_task_memory={% raw %}${{ vars.ECS_TASK_MEMORY }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_ecs_service_desired_count=${TF_VAR_ecs_service_desired_count:-1}" >> $GITHUB_ENV
+          echo "TF_VAR_path_base={% raw %}${{ vars.PATH_BASE }}{% endraw %}" >> $GITHUB_ENV
+{% endif %}
+{% if config.include_alb %}
+          if [ -n "{% raw %}${{ vars.ACM_CERTIFICATE_ARNS }}{% endraw %}" ]; then
+            echo 'TF_VAR_acm_certificate_arns={% raw %}${{ vars.ACM_CERTIFICATE_ARNS }}{% endraw %}' >> $GITHUB_ENV
+          else
+            echo "TF_VAR_acm_certificate_arns=[]" >> $GITHUB_ENV
+          fi
+          echo "TF_VAR_api_certificate_arn_index=${TF_VAR_api_certificate_arn_index:-0}" >> $GITHUB_ENV
+{% endif %}
+{% if config.include_route53 %}
+          echo "TF_VAR_api_subdomain={% raw %}${{ vars.API_SUBDOMAIN }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_route53_zone_name={% raw %}${{ vars.ROUTE53_ZONE_NAME }}{% endraw %}" >> $GITHUB_ENV
+{% endif %}
+
+      - name: Terraform init (S3 backend)
+        run: |
+          terraform init -reconfigure \
+            -backend-config="bucket={% raw %}${{ vars.TF_STATE_BUCKET }}{% endraw %}" \
+            -backend-config="key={% raw %}${{ vars.TF_STATE_KEY }}{% endraw %}" \
+            -backend-config="region={% raw %}${{ vars.AWS_REGION }}{% endraw %}" \
+            -backend-config="dynamodb_table={% raw %}${{ vars.TF_STATE_DYNAMODB_TABLE }}{% endraw %}" \
+            -backend-config="encrypt=true"
+
+      - name: Save full state snapshot to S3 (pre-destroy backup)
+        run: |
+          set -euo pipefail
+          terraform state pull > ../pre_destroy.tfstate
+          STATE_SIZE=$(wc -c < ../pre_destroy.tfstate)
+          if [ "$STATE_SIZE" -lt 100 ]; then
+            echo "ERROR: State snapshot is suspiciously small. Aborting."; exit 1
+          fi
+          SNAPSHOT_KEY="terraform-preserved/{% raw %}${{ env.ENVIRONMENT }}{% endraw %}/pre_destroy_$(date -u +%Y%m%d_%H%M%S).tfstate"
+          LATEST_KEY="terraform-preserved/{% raw %}${{ env.ENVIRONMENT }}{% endraw %}/pre_destroy_latest.tfstate"
+          aws s3 cp ../pre_destroy.tfstate "s3://{% raw %}${{ vars.TF_STATE_BUCKET }}{% endraw %}/${SNAPSHOT_KEY}" --region "{% raw %}${{ vars.AWS_REGION }}{% endraw %}"
+          aws s3 cp ../pre_destroy.tfstate "s3://{% raw %}${{ vars.TF_STATE_BUCKET }}{% endraw %}/${LATEST_KEY}" --region "{% raw %}${{ vars.AWS_REGION }}{% endraw %}"
+
+      - name: Strip prevent_destroy from local .tf files
+        run: |
+          find . -name "*.tf" -exec sed -i 's/prevent_destroy\s*=\s*true/prevent_destroy = false/g' {} \;
+
+      - name: Remove preserved resources from Terraform state
+        run: |
+          set -euo pipefail
+          rm_state() { terraform state rm "$1" 2>&1 || true; }
+
+          echo "=== Removing networking ==="
+          rm_state "aws_vpc.main"
+          rm_state "aws_internet_gateway.main"
+          rm_state "aws_subnet.public"
+          rm_state "aws_subnet.private"
+          rm_state "aws_subnet.private_2a"
+          rm_state "aws_subnet.private_2b"
+          rm_state "aws_subnet.private_app_2a"
+          rm_state "aws_subnet.private_app_2b"
+          rm_state "aws_subnet.public_2b"
+          rm_state "aws_route_table.public"
+          rm_state "aws_route_table.private_app"
+          rm_state "aws_route_table_association.public"
+          rm_state "aws_route_table_association.public_2b"
+          rm_state "aws_route_table_association.private_app_2a"
+          rm_state "aws_route_table_association.private_app_2b"
+
+          echo "=== Removing security groups ==="
+{% if config.include_ec2_bastion %}
+          rm_state "aws_security_group.ec2"
+{% endif %}
+{% if config.include_rds %}
+          rm_state "aws_security_group.rds"
+{% endif %}
+
+{% if config.include_ec2_bastion %}
+          echo "=== Removing EC2 SSM IAM ==="
+          rm_state "aws_iam_role.ec2_ssm_role"
+          rm_state "aws_iam_role_policy_attachment.ssm_policy"
+          rm_state "aws_iam_instance_profile.ec2_profile"
+{% endif %}
+
+{% if config.include_rds %}
+          echo "=== Removing RDS ==="
+          rm_state "aws_db_parameter_group.postgres"
+          rm_state "aws_db_subnet_group.postgres"
+          rm_state "aws_db_instance.postgres"
+{% endif %}
+{% if config.include_kms %}
+          rm_state "aws_kms_key.main"
+          rm_state "aws_kms_alias.main"
+{% endif %}
+
+{% if config.include_ssm %}
+          echo "=== Removing SSM ==="
+          rm_state "random_password.hashids_salt"
+          rm_state "aws_ssm_parameter.hashids_salt"
+{% endif %}
+
+{% if config.include_ecr %}
+          echo "=== Removing ECR ==="
+          rm_state "aws_ecr_repository.app"
+          rm_state "aws_ecr_lifecycle_policy.app"
+{% endif %}
+
+{% if config.include_ecs %}
+          echo "=== Removing ECS IAM roles ==="
+          rm_state "aws_iam_role.ecs_task_execution"
+          rm_state "aws_iam_role_policy_attachment.ecs_task_execution"
+          rm_state "aws_iam_role_policy.ecs_secrets_access"
+          rm_state "aws_iam_role.ecs_task"
+          rm_state "aws_iam_role_policy.ecs_task_permissions"
+{% endif %}
+
+{% if config.include_alb %}
+      - name: Empty ALB logs S3 bucket before destroy
+        run: |
+          BUCKET="{% raw %}${{ vars.PROJECT_NAME }}{% endraw %}-{% raw %}${{ env.ENVIRONMENT }}{% endraw %}-alb-logs"
+          aws s3 rm "s3://${BUCKET}" --recursive --region "{% raw %}${{ vars.AWS_REGION }}{% endraw %}" 2>&1 || true
+{% endif %}
+
+      - name: Terraform destroy
+        run: terraform destroy -auto-approve
+
+      - name: Destroy summary
+        if: always()
+        run: |
+          echo "================================"
+          echo "Destroy workflow complete for {% raw %}${{ env.ENVIRONMENT }}{% endraw %}"
+          echo "State snapshot saved to S3."
+          echo "================================"

@@ -1,0 +1,189 @@
+{% if config.include_frontend %}
+name: Deploy Frontend to S3 and Invalidate CloudFront
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment target'
+        required: false
+        default: '{{ config.environments[0] | default("beta") }}'
+        type: choice
+        options:
+{% for env in config.environments %}
+          - {{ env }}
+{% endfor %}
+{% if config.include_cloudfront %}
+      cloudfront_distribution_id:
+        description: 'Optional: CloudFront distribution ID'
+        required: false
+        type: string
+      cloudfront_domain:
+        description: 'Optional: CloudFront domain'
+        required: false
+        type: string
+{% endif %}
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment: "{% raw %}${{ github.event_name == 'push' && '{% endraw %}{{ config.environments[0] | default("beta") }}{% raw %}' || github.event.inputs.environment }}{% endraw %}"
+    env:
+      AWS_REGION: {{ config.aws_region }}
+      S3_BUCKET: {% raw %}${{ vars.S3_BUCKET_FRONTEND }}{% endraw %}
+      ROLE_ARN: {% raw %}${{ secrets.AWS_ROLE_ARN }}{% endraw %}
+{% if config.include_cloudfront %}
+      CLOUDFRONT_DISTRIBUTION_ID: {% raw %}${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}{% endraw %}
+      CLOUDFRONT_DOMAIN: {% raw %}${{ secrets.CLOUDFRONT_DOMAIN }}{% endraw %}
+{% endif %}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Determine DEPLOY_ENV
+        run: |
+          if [ "{% raw %}${{ github.event_name }}{% endraw %}" = "push" ]; then
+            echo "DEPLOY_ENV={{ config.environments[0] | default('beta') }}" >> $GITHUB_ENV
+          else
+            echo "DEPLOY_ENV={% raw %}${{ github.event.inputs.environment }}{% endraw %}" >> $GITHUB_ENV
+          fi
+
+{% if config.include_cloudfront %}
+      - name: Resolve CloudFront inputs
+        env:
+          CLOUDFRONT_DISTRIBUTION_ID_INPUT: {% raw %}${{ github.event.inputs.cloudfront_distribution_id }}{% endraw %}
+          CLOUDFRONT_DISTRIBUTION_ID_SECRET: {% raw %}${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}{% endraw %}
+          CLOUDFRONT_DOMAIN_INPUT: {% raw %}${{ github.event.inputs.cloudfront_domain }}{% endraw %}
+          CLOUDFRONT_DOMAIN_SECRET: {% raw %}${{ secrets.CLOUDFRONT_DOMAIN }}{% endraw %}
+        run: |
+          if [ -n "${CLOUDFRONT_DISTRIBUTION_ID_INPUT}" ]; then
+            echo "CLOUDFRONT_DISTRIBUTION_ID=${CLOUDFRONT_DISTRIBUTION_ID_INPUT}" >> $GITHUB_ENV
+          elif [ -n "${CLOUDFRONT_DISTRIBUTION_ID_SECRET}" ]; then
+            echo "CLOUDFRONT_DISTRIBUTION_ID=${CLOUDFRONT_DISTRIBUTION_ID_SECRET}" >> $GITHUB_ENV
+          fi
+          if [ -n "${CLOUDFRONT_DOMAIN_INPUT}" ]; then
+            echo "CLOUDFRONT_DOMAIN=${CLOUDFRONT_DOMAIN_INPUT}" >> $GITHUB_ENV
+          elif [ -n "${CLOUDFRONT_DOMAIN_SECRET}" ]; then
+            echo "CLOUDFRONT_DOMAIN=${CLOUDFRONT_DOMAIN_SECRET}" >> $GITHUB_ENV
+          fi
+{% endif %}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6.1.0
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: {{ config.frontend_path }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: {{ config.frontend_path }}
+        run: npm ci
+
+      - name: Wait for backend build workflow to finish (if running)
+        env:
+          GITHUB_TOKEN: {% raw %}${{ secrets.GITHUB_TOKEN }}{% endraw %}
+          GITHUB_REPOSITORY: {% raw %}${{ github.repository }}{% endraw %}
+          TARGET_WORKFLOW_PATH: .github/workflows/2-backend-build-and-push.yml
+        run: |
+          set -euo pipefail
+          command -v jq >/dev/null || (sudo apt-get update -y && sudo apt-get install -y jq)
+          WORKFLOWS_API="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows"
+          WORKFLOW_ID=$(curl -s -H "Authorization: token ${GITHUB_TOKEN}" "$WORKFLOWS_API" | jq -r --arg p "$TARGET_WORKFLOW_PATH" '.workflows[] | select(.path==$p) | .id')
+          if [ -z "$WORKFLOW_ID" ] || [ "$WORKFLOW_ID" = "null" ]; then
+            echo "Target workflow not found - continuing"
+          else
+            sleep 2
+            latest_run=$(curl -s -H "Authorization: token ${GITHUB_TOKEN}" "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW_ID}/runs?per_page=1")
+            latest_status=$(echo "$latest_run" | jq -r '.workflow_runs[0].status // "unknown"')
+            latest_conclusion=$(echo "$latest_run" | jq -r '.workflow_runs[0].conclusion // "null"')
+            if [ "$latest_status" = "completed" ] && { [ "$latest_conclusion" = "failure" ] || [ "$latest_conclusion" = "cancelled" ]; }; then
+              echo "ERROR: Backend build workflow failed ($latest_conclusion)"; exit 1
+            elif [ "$latest_status" = "queued" ] || [ "$latest_status" = "in_progress" ]; then
+              MAX_WAIT=1800; INTERVAL=15; waited=0
+              while true; do
+                runs=$(curl -s -H "Authorization: token ${GITHUB_TOKEN}" "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW_ID}/runs?status=in_progress")
+                count=$(echo "$runs" | jq '.total_count')
+                if [ "$count" -eq 0 ]; then break; fi
+                sleep $INTERVAL; waited=$((waited+INTERVAL))
+                if [ $waited -ge $MAX_WAIT ]; then echo "Timed out"; exit 1; fi
+              done
+            fi
+          fi
+
+      - name: Write production environment file
+        working-directory: {{ config.frontend_path }}
+        env:
+          DEPLOY_ENV: {% raw %}${{ env.DEPLOY_ENV }}{% endraw %}
+        run: |
+          touch .env.production
+          python3 - <<'PY'
+          import os, re, pathlib
+          p = pathlib.Path('.env.production')
+          lines = p.read_text().splitlines() if p.exists() else []
+          def set_key(lines, key, val):
+              pat = re.compile(r'^' + re.escape(key) + r'=')
+              for i, l in enumerate(lines):
+                  if pat.match(l):
+                      lines[i] = f"{key}={val}"
+                      return lines
+              lines.append(f"{key}={val}")
+              return lines
+{% if config.include_route53 %}
+          lines = set_key(lines, 'VITE_API_URL', f"https://{{ config.dns.api_subdomain | default('api') }}.{{ config.dns.zone_name | default('example.com') }}/{{ config.project_name }}-{os.environ.get('DEPLOY_ENV')}/content")
+{% endif %}
+{% if config.include_cloudfront %}
+          lines = set_key(lines, 'VITE_CDN_URL', f"https://{os.environ.get('CLOUDFRONT_DOMAIN', '')}")
+{% endif %}
+          p.write_text('\n'.join(lines) + ('\n' if lines else ''))
+          PY
+
+      - name: Build
+        working-directory: {{ config.frontend_path }}
+        run: npm run build
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v5.1.1
+        with:
+          role-to-assume: {% raw %}${{ env.ROLE_ARN }}{% endraw %}
+          aws-region: {% raw %}${{ env.AWS_REGION }}{% endraw %}
+          audience: sts.amazonaws.com
+
+      - name: Validate S3_BUCKET is set
+        run: |
+          if [ -z "${S3_BUCKET:-}" ]; then
+            echo "ERROR: S3_BUCKET is not set." >&2; exit 1
+          fi
+
+      - name: Sync build to S3
+        run: |
+          aws s3 sync ./{{ config.frontend_path }}/dist s3://${S3_BUCKET} \
+            --delete \
+            --cache-control "public, max-age=31536000" \
+            --exclude "index.html" && \
+          aws s3 cp ./{{ config.frontend_path }}/dist/index.html s3://${S3_BUCKET}/index.html \
+            --cache-control "no-cache, no-store, must-revalidate"
+
+{% if config.include_cloudfront %}
+      - name: Invalidate CloudFront cache
+        run: |
+          if [ -z "${CLOUDFRONT_DISTRIBUTION_ID:-}" ]; then
+            echo "Skipping CloudFront invalidation (no distribution ID set)"
+          else
+            aws cloudfront create-invalidation \
+              --distribution-id ${CLOUDFRONT_DISTRIBUTION_ID} \
+              --paths "/*"
+          fi
+{% endif %}
+
+      - name: Post-deploy output
+        run: |
+          echo "Deployed to S3: s3://${S3_BUCKET}"
+{% endif %}

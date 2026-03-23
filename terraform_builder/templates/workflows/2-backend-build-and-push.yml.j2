@@ -1,0 +1,134 @@
+name: Build and Push Docker Image to ECR
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: false
+        default: '{{ config.environments[0] | default("beta") }}'
+        type: choice
+        options:
+{% for env in config.environments %}
+          - {{ env }}
+{% endfor %}
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+env:
+  AWS_REGION: {{ config.aws_region }}
+  ENVIRONMENT: {% raw %}${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || '{% endraw %}{{ config.environments[0] | default("beta") }}{% raw %}' }}{% endraw %}
+
+jobs:
+  build-and-push:
+    name: Build and push Docker image to ECR
+    runs-on: ubuntu-latest
+    environment: {% raw %}${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || '{% endraw %}{{ config.environments[0] | default("beta") }}{% raw %}' }}{% endraw %}
+    env:
+      IMAGE_REPOSITORY: {% raw %}${{ format('{0}-{% endraw %}{{ config.project_name }}-api{% raw %}', github.event_name == 'workflow_dispatch' && github.event.inputs.environment || '{% endraw %}{{ config.environments[0] | default("beta") }}{% raw %}') }}{% endraw %}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v5.1.1
+        with:
+          role-to-assume: {% raw %}${{ secrets.CI_AWS_ROLE_ARN }}{% endraw %}
+          aws-region: {% raw %}${{ env.AWS_REGION }}{% endraw %}
+          audience: sts.amazonaws.com
+
+      - name: Wait for infra workflow to finish (if running)
+        env:
+          GITHUB_TOKEN: {% raw %}${{ secrets.GITHUB_TOKEN }}{% endraw %}
+          GITHUB_REPOSITORY: {% raw %}${{ github.repository }}{% endraw %}
+          TARGET_WORKFLOW_PATH: .github/workflows/1-deploy-infra.yml
+        run: |
+          set -euo pipefail
+          command -v jq >/dev/null || (sudo apt-get update -y && sudo apt-get install -y jq)
+          WORKFLOWS_API="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows"
+          WORKFLOW_ID=$(curl -s -H "Authorization: token ${GITHUB_TOKEN}" "$WORKFLOWS_API" | jq -r --arg p "$TARGET_WORKFLOW_PATH" '.workflows[] | select(.path==$p) | .id')
+          if [ -z "$WORKFLOW_ID" ] || [ "$WORKFLOW_ID" = "null" ]; then
+            echo "Target workflow not found - continuing"
+          else
+            echo "Checking latest run status for workflow id $WORKFLOW_ID"
+            sleep 2
+            latest_run=$(curl -s -H "Authorization: token ${GITHUB_TOKEN}" "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW_ID}/runs?per_page=1")
+            latest_status=$(echo "$latest_run" | jq -r '.workflow_runs[0].status // "unknown"')
+            latest_conclusion=$(echo "$latest_run" | jq -r '.workflow_runs[0].conclusion // "null"')
+            if [ "$latest_status" = "completed" ]; then
+              if [ "$latest_conclusion" = "failure" ] || [ "$latest_conclusion" = "cancelled" ]; then
+                echo "ERROR: Latest infra workflow failed ($latest_conclusion). Cannot proceed."
+                exit 1
+              fi
+            elif [ "$latest_status" = "queued" ] || [ "$latest_status" = "in_progress" ]; then
+              MAX_WAIT=1800; INTERVAL=15; waited=0
+              while true; do
+                runs=$(curl -s -H "Authorization: token ${GITHUB_TOKEN}" "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW_ID}/runs?status=in_progress")
+                count=$(echo "$runs" | jq '.total_count')
+                if [ "$count" -eq 0 ]; then echo "No in-progress runs"; break; fi
+                echo "Waiting ${INTERVAL}s..."; sleep $INTERVAL; waited=$((waited+INTERVAL))
+                if [ $waited -ge $MAX_WAIT ]; then echo "Timed out"; exit 1; fi
+              done
+            fi
+          fi
+
+      - name: Login to ECR
+        id: ecr-login
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+          echo "registry=${ECR_REGISTRY}" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure ECR repository exists
+        run: |
+          aws ecr describe-repositories --repository-names "${IMAGE_REPOSITORY}" || \
+            aws ecr create-repository --repository-name "${IMAGE_REPOSITORY}" --image-scanning-configuration scanOnPush=true
+
+      - name: Build and push image
+        uses: docker/build-push-action@v4
+        with:
+          context: ./{{ config.backend_app_path }}
+          push: true
+          tags: |
+            {% raw %}${{ steps.ecr-login.outputs.registry }}/${{ env.IMAGE_REPOSITORY }}{% endraw %}:latest
+            {% raw %}${{ steps.ecr-login.outputs.registry }}/${{ env.IMAGE_REPOSITORY }}:${{ github.sha }}{% endraw %}
+
+{% if config.include_ecs %}
+      - name: Force ECS service deployment
+        run: |
+          aws ecs update-service \
+            --cluster "${CLUSTER_NAME}" \
+            --service "${SERVICE_NAME}" \
+            --force-new-deployment \
+            --region "${AWS_REGION}"
+        env:
+          CLUSTER_NAME: {% raw %}${{ format('{0}-{1}-cluster', vars.PROJECT_NAME, env.ENVIRONMENT) }}{% endraw %}
+          SERVICE_NAME: {% raw %}${{ format('{0}-{1}-{% endraw %}{{ config.project_name }}-app{% raw %}', vars.PROJECT_NAME, env.ENVIRONMENT) }}{% endraw %}
+
+      - name: Wait for ECS service to stabilize
+        run: |
+          set -euo pipefail
+          CLUSTER_NAME="{% raw %}${{ format('{0}-{1}-cluster', vars.PROJECT_NAME, env.ENVIRONMENT) }}{% endraw %}"
+          SERVICE_NAME="{% raw %}${{ format('{0}-{1}-{% endraw %}{{ config.project_name }}-app{% raw %}', vars.PROJECT_NAME, env.ENVIRONMENT) }}{% endraw %}"
+          MAX_WAIT=600; INTERVAL=10; waited=0
+          while [ $waited -lt $MAX_WAIT ]; do
+            service_info=$(aws ecs describe-services --cluster "${CLUSTER_NAME}" --services "${SERVICE_NAME}" --region "${AWS_REGION}" --query 'services[0]' --output json)
+            desired=$(echo "$service_info" | jq -r '.desiredCount')
+            running=$(echo "$service_info" | jq -r '.runningCount')
+            pending=$(echo "$service_info" | jq -r '.pendingCount')
+            in_progress=$(echo "$service_info" | jq '[.deployments[] | select(.pendingCount > 0 or (.runningCount < .desiredCount))] | length')
+            echo "Desired: ${desired}, Running: ${running}, Pending: ${pending}"
+            if [ "$desired" -eq "$running" ] && [ "$pending" -eq 0 ] && [ "$in_progress" -eq 0 ] && [ "$running" -gt 0 ]; then
+              echo "ECS service deployment complete"
+              exit 0
+            fi
+            sleep $INTERVAL; waited=$((waited+INTERVAL))
+          done
+          echo "Timed out waiting for ECS service"; exit 1
+        env:
+          AWS_REGION: {% raw %}${{ env.AWS_REGION }}{% endraw %}
+{% endif %}

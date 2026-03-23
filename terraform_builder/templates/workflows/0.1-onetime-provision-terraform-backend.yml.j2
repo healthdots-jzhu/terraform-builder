@@ -1,0 +1,110 @@
+name: OneTime Provision Terraform Backend for State (S3 + DynamoDB)
+
+on:
+  workflow_dispatch:
+    inputs:
+      provision_AWS_ROLE_ARN_note:
+        description: 'NOTE: create repo secret AWS_ROLE_ARN before running.'
+        required: false
+        default: 'N/A - note only'
+      aws_region:
+        description: "AWS region to deploy backend resources"
+        required: true
+        default: "{{ config.aws_region }}"
+      bucket_name:
+        description: "S3 bucket name for Terraform state (must be globally unique)"
+        required: true
+      table_name:
+        description: "DynamoDB table name for Terraform locks"
+        required: true
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v5.1.1
+        with:
+          aws-region: {% raw %}${{ inputs.aws_region }}{% endraw %}
+          role-to-assume: {% raw %}${{ secrets.AWS_ROLE_ARN }}{% endraw %}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3.1.2
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: terraform/state-init
+        run: terraform init -input=false
+
+      - name: Terraform Validate
+        working-directory: terraform/state-init
+        run: terraform validate -no-color
+
+      - name: Pre-check backend resources
+        working-directory: terraform/state-init
+        env:
+          AWS_REGION: {% raw %}${{ inputs.aws_region }}{% endraw %}
+        run: |
+          set -euo pipefail
+          if [ -z "{% raw %}${{ inputs.bucket_name }}{% endraw %}" ] || [ -z "{% raw %}${{ inputs.table_name }}{% endraw %}" ]; then
+            echo "Error: 'bucket_name' and 'table_name' must be provided." >&2
+            exit 1
+          fi
+          BUCKET='{% raw %}${{ inputs.bucket_name }}{% endraw %}'
+          TABLE='{% raw %}${{ inputs.table_name }}{% endraw %}'
+          echo "Checking S3 bucket '${BUCKET}'..."
+          set +e
+          HB_OUT=$(aws s3api head-bucket --bucket "${BUCKET}" 2>&1)
+          HB_RC=$?
+          set -e
+          if [ $HB_RC -eq 0 ]; then
+            echo "Pre-existing S3 bucket detected: ${BUCKET}. Aborting." >&2
+            exit 1
+          else
+            if echo "$HB_OUT" | grep -qi "not found\|404\|NoSuchBucket"; then
+              echo "S3 bucket ${BUCKET} not found. OK to proceed."
+            else
+              echo "Ambiguous S3 response:" >&2; echo "$HB_OUT" >&2; exit 1
+            fi
+          fi
+          echo "Checking DynamoDB table '${TABLE}'..."
+          set +e
+          DT_OUT=$(aws dynamodb describe-table --table-name "${TABLE}" 2>&1)
+          DT_RC=$?
+          set -e
+          if [ $DT_RC -eq 0 ]; then
+            echo "Pre-existing DynamoDB table detected: ${TABLE}. Aborting." >&2
+            exit 1
+          else
+            if echo "$DT_OUT" | grep -qi "ResourceNotFoundException\|not found\|NotFound"; then
+              echo "DynamoDB table ${TABLE} not found. OK to proceed."
+            else
+              echo "Ambiguous DynamoDB response:" >&2; echo "$DT_OUT" >&2; exit 1
+            fi
+          fi
+
+      - name: Terraform Plan
+        working-directory: terraform/state-init
+        env:
+          AWS_REGION: {% raw %}${{ inputs.aws_region }}{% endraw %}
+        run: |
+          TF_VAR_aws_region='{% raw %}${{ inputs.aws_region }}{% endraw %}' \
+          TF_VAR_bucket_name='{% raw %}${{ inputs.bucket_name }}{% endraw %}' \
+          TF_VAR_lock_table_name='{% raw %}${{ inputs.table_name }}{% endraw %}' \
+          terraform plan -input=false -out=tfplan
+
+      - name: Terraform Apply (one-time provisioning)
+        working-directory: terraform/state-init
+        run: terraform apply -auto-approve -input=false tfplan
+
+      - name: Show outputs
+        working-directory: terraform/state-init
+        run: terraform output -json

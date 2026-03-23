@@ -1,0 +1,12 @@
+// S3 backend configuration for bootstrap orchestration.
+// Update values and run: terraform init -reconfigure -migrate-state
+
+terraform {
+  backend "s3" {
+    bucket         = "{{ config.project_name }}-terraform-state"
+    key            = "{{ config.project_name }}/bootstrap.tfstate"
+    region         = "{{ config.aws_region }}"
+    dynamodb_table = "{{ config.project_name }}-terraform-locks"
+    encrypt        = true
+  }
+}

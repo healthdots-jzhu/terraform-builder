@@ -1,0 +1,47 @@
+# ═══════════════════════════════════════════════════════════════════════
+# Outputs — {{ config.project_name }}
+# ═══════════════════════════════════════════════════════════════════════
+
+output "vpc_id" {
+  value = aws_vpc.main.id
+}
+
+{% if config.include_ec2_bastion %}
+output "ec2_instance_id" {
+  value = aws_instance.bastion.id
+}
+
+output "ec2_public_ip" {
+  value = aws_instance.bastion.public_ip
+}
+
+output "ssm_session_command" {
+  value = "aws ssm start-session --target ${aws_instance.bastion.id} --region ${var.aws_region}"
+}
+{% endif %}
+
+{% if config.include_rds %}
+output "rds_endpoint" {
+  value = aws_db_instance.postgres.endpoint
+}
+
+output "rds_address" {
+  value = aws_db_instance.postgres.address
+}
+
+output "rds_database_name" {
+  value = aws_db_instance.postgres.db_name
+}
+{% endif %}
+
+{% if config.include_ecr %}
+output "ecr_repository_url" {
+  value = aws_ecr_repository.app.repository_url
+}
+{% endif %}
+
+{% if config.include_scheduler %}
+output "scheduler_lambda_arn" {
+  value = aws_lambda_function.scheduler.arn
+}
+{% endif %}

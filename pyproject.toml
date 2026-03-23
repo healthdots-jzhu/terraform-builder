@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "terraform-builder"
+version = "0.1.0"
+description = "Interactive CLI wizard that generates production-ready Terraform scripts and GitHub Actions workflows for AWS infrastructure."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+dependencies = [
+    "click>=8.1",
+    "rich>=13.0",
+    "InquirerPy>=0.3.4",
+    "jinja2>=3.1",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+
+[project.scripts]
+terraform-builder = "terraform_builder.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["terraform_builder*"]
+
+[tool.setuptools.package-data]
+terraform_builder = ["templates/**/*.j2", "templates/**/*.ps1", "templates/**/*.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

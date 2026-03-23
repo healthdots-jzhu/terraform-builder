@@ -1,0 +1,123 @@
+# ═══════════════════════════════════════════════════════════════════════
+# Variables — {{ config.project_name }}
+# ═══════════════════════════════════════════════════════════════════════
+
+variable "aws_region" {
+  description = "AWS region"
+  type        = string
+  default     = "{{ config.aws_region }}"
+}
+
+variable "environment" {
+  description = "Deployment environment (e.g., staging, beta, prod)"
+  type        = string
+  default     = "{{ config.default_environment }}"
+}
+
+variable "project_name" {
+  description = "Project name used for resource naming"
+  type        = string
+  default     = "{{ config.project_name }}"
+}
+
+# --- Networking ---
+variable "vpc_cidr" {
+  type    = string
+  default = "{{ config.vpc.vpc_cidr }}"
+}
+
+variable "public_subnet_cidr" {
+  type    = string
+  default = "{{ config.vpc.public_subnet_cidr }}"
+}
+
+variable "public_2b_cidr" {
+  type    = string
+  default = "{{ config.vpc.public_2b_cidr }}"
+}
+
+variable "private_2a_cidr" {
+  type    = string
+  default = "{{ config.vpc.private_2a_cidr }}"
+}
+
+variable "private_2b_cidr" {
+  type    = string
+  default = "{{ config.vpc.private_2b_cidr }}"
+}
+
+{% if config.include_route53 %}
+# --- DNS ---
+variable "route53_zone_name" {
+  type    = string
+  default = "{{ config.dns.route53_zone_name }}"
+}
+
+variable "api_subdomain" {
+  type    = string
+  default = "{{ config.dns.api_subdomain }}"
+}
+{% endif %}
+
+variable "path_base" {
+  description = "API path base for ALB routing (e.g., /myproject-beta/api)"
+  type        = string
+  default     = ""
+}
+
+{% if config.include_ec2_bastion %}
+# --- EC2 ---
+variable "rds_ssm_ec2_instance_type" {
+  type    = string
+  default = "{{ config.ec2.instance_type }}"
+}
+{% endif %}
+
+{% if config.include_rds %}
+# --- RDS ---
+variable "rds_instance_class" {
+  type    = string
+  default = "{{ config.rds.instance_class }}"
+}
+
+variable "rds_allocated_storage" {
+  type    = number
+  default = {{ config.rds.allocated_storage }}
+}
+
+variable "postgres_version" {
+  type    = string
+  default = "{{ config.rds.postgres_version }}"
+}
+
+variable "rds_database_name" {
+  type    = string
+  default = "{{ config.rds.database_name }}"
+}
+
+variable "rds_username" {
+  type      = string
+  default   = "{{ config.rds.username }}"
+  sensitive = true
+}
+
+variable "rds_storage_type" {
+  type    = string
+  default = "{{ config.rds.storage_type }}"
+}
+
+variable "rds_skip_final_snapshot" {
+  type    = bool
+  default = {{ config.rds.skip_final_snapshot | lower }}
+}
+
+variable "rds_backup_retention_period" {
+  type    = number
+  default = {{ config.rds.backup_retention_period }}
+}
+
+variable "rds_multi_az" {
+  type    = bool
+  default = {{ config.rds.multi_az | lower }}
+}
+{% endif %}

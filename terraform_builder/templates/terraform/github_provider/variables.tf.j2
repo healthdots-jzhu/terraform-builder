@@ -1,0 +1,67 @@
+variable "github_token" {
+  description = "GitHub token with repo access to manage Actions variables/secrets"
+  type        = string
+  default     = ""
+}
+
+variable "github_owner" {
+  description = "GitHub organization or user owning the repository"
+  type        = string
+}
+
+variable "repository" {
+  description = "Repository name (without owner)"
+  type        = string
+}
+
+variable "tf_state_bucket" {
+  description = "S3 bucket name for Terraform state"
+  type        = string
+  default     = ""
+}
+
+variable "tf_state_key" {
+  description = "S3 key for Terraform state"
+  type        = string
+  default     = ""
+}
+
+variable "aws_region" {
+  description = "AWS region"
+  type        = string
+  default     = "{{ config.aws_region }}"
+}
+
+variable "tf_state_dynamodb_table" {
+  description = "DynamoDB table for Terraform state locking"
+  type        = string
+  default     = ""
+}
+
+variable "create_repo_aws_role_secret" {
+  description = "When true, create CI_AWS_ROLE_ARN repository secret"
+  type        = bool
+  default     = false
+}
+
+variable "environments" {
+  description = "Map of environments to create"
+  type        = map(any)
+  default     = {}
+  validation {
+    condition     = length(var.environments) > 0
+    error_message = "The variable 'environments' must be a non-empty map."
+  }
+}
+
+variable "aws_role_arn" {
+  description = "AWS Role ARN to store as a repository secret"
+  type        = string
+  default     = ""
+}
+
+variable "environment" {
+  description = "Environment name"
+  type        = string
+  default     = "dev"
+}

@@ -1,0 +1,169 @@
+name: Deploy Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: false
+        default: '{{ config.environments[0] | default("beta") }}'
+        type: choice
+        options:
+{% for env in config.environments %}
+          - {{ env }}
+{% endfor %}
+{% if config.include_secrets_manager %}
+      postgres_connection_string:
+        description: 'Postgres connection string (optional; only for manual runs to update secret)'
+        required: false
+        default: ''
+      github_models_api_token:
+        description: 'GitHub Models API token (optional; for manual runs)'
+        required: false
+        default: ''
+{% endif %}
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: {{ config.aws_region }}
+  ENVIRONMENT: {% raw %}${{ github.event.inputs.environment || '{% endraw %}{{ config.environments[0] | default("beta") }}{% raw %}' }}{% endraw %}
+
+jobs:
+  terraform:
+    name: Terraform plan/apply
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    environment: {% raw %}${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || '{% endraw %}{{ config.environments[0] | default("beta") }}{% raw %}' }}{% endraw %}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v5.1.1
+        with:
+          role-to-assume: {% raw %}${{ secrets.CI_AWS_ROLE_ARN }}{% endraw %}
+          aws-region: {% raw %}${{ env.AWS_REGION }}{% endraw %}
+          audience: sts.amazonaws.com
+
+{% if config.include_secrets_manager %}
+      - name: Verify or update Secrets Manager secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          POSTGRES_INPUT="{% raw %}${{ github.event.inputs.postgres_connection_string }}{% endraw %}"
+          GITHUB_INPUT="{% raw %}${{ github.event.inputs.github_models_api_token }}{% endraw %}"
+          SECRET_POSTGRES_NAME="{% raw %}${{ vars.PROJECT_NAME }}{% endraw %}-{% raw %}${{ env.ENVIRONMENT }}{% endraw %}-postgres-connection"
+          SECRET_GITHUB_NAME="{% raw %}${{ vars.PROJECT_NAME }}{% endraw %}-{% raw %}${{ env.ENVIRONMENT }}{% endraw %}-github-models-token"
+
+          check_secret_has_version() {
+            COUNT=$(aws secretsmanager list-secret-version-ids --secret-id "$1" --query 'length(Versions)' --output text 2>/dev/null || echo 0)
+            [ "$COUNT" -gt 0 ]
+          }
+          create_or_put_secret() {
+            if aws secretsmanager describe-secret --secret-id "$1" >/dev/null 2>&1; then
+              aws secretsmanager put-secret-value --secret-id "$1" --secret-string "$2"
+            else
+              aws secretsmanager create-secret --name "$1" --secret-string "$2" --description "Created by GitHub Actions" || true
+            fi
+          }
+
+          if [ -n "$POSTGRES_INPUT" ]; then
+            create_or_put_secret "$SECRET_POSTGRES_NAME" "$POSTGRES_INPUT"
+            echo "Stored value for $SECRET_POSTGRES_NAME"
+          elif ! check_secret_has_version "$SECRET_POSTGRES_NAME"; then
+            echo "ERROR: Secret $SECRET_POSTGRES_NAME missing. Provide 'postgres_connection_string' input."
+            exit 1
+          fi
+
+          if [ -n "$GITHUB_INPUT" ]; then
+            create_or_put_secret "$SECRET_GITHUB_NAME" "$GITHUB_INPUT"
+            echo "Stored value for $SECRET_GITHUB_NAME"
+          elif ! check_secret_has_version "$SECRET_GITHUB_NAME"; then
+            echo "ERROR: Secret $SECRET_GITHUB_NAME missing. Provide 'github_models_api_token' input."
+            exit 1
+          fi
+{% endif %}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: "1.14.3"
+
+      - name: Terraform init (S3 backend)
+        run: |
+          terraform init -reconfigure \
+            -backend-config="bucket={% raw %}${{ vars.TF_STATE_BUCKET }}{% endraw %}" \
+            -backend-config="key={% raw %}${{ vars.TF_STATE_KEY }}{% endraw %}" \
+            -backend-config="region={% raw %}${{ vars.AWS_REGION }}{% endraw %}" \
+            -backend-config="dynamodb_table={% raw %}${{ vars.TF_STATE_DYNAMODB_TABLE }}{% endraw %}" \
+            -backend-config="encrypt=true"
+
+      - name: Export GitHub variables to TF_VAR_*
+        run: |
+          echo "TF_VAR_environment={% raw %}${{ env.ENVIRONMENT }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_aws_region={% raw %}${{ vars.AWS_REGION }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_project_name={% raw %}${{ vars.PROJECT_NAME }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_vpc_cidr={% raw %}${{ vars.VPC_CIDR }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_public_subnet_cidr={% raw %}${{ vars.PUBLIC_SUBNET_CIDR }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_public_2b_cidr={% raw %}${{ vars.PUBLIC_2B_CIDR }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_private_subnet_cidr={% raw %}${{ vars.PRIVATE_SUBNET_CIDR }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_private_2a_cidr={% raw %}${{ vars.PRIVATE_2A_CIDR }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_private_2b_cidr={% raw %}${{ vars.PRIVATE_2B_CIDR }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_private_app_2a_cidr={% raw %}${{ vars.PRIVATE_APP_2A_CIDR }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_private_app_2b_cidr={% raw %}${{ vars.PRIVATE_APP_2B_CIDR }}{% endraw %}" >> $GITHUB_ENV
+{% if config.include_s3_frontend %}
+          echo "TF_VAR_s3_bucket_frontend={% raw %}${{ vars.S3_BUCKET_FRONTEND }}{% endraw %}" >> $GITHUB_ENV
+{% endif %}
+{% if config.include_ec2_bastion %}
+          if [ -n "{% raw %}${{ vars.RDS_SSM_EC2_INSTANCE_TYPE }}{% endraw %}" ]; then
+            echo "TF_VAR_rds_ssm_ec2_instance_type={% raw %}${{ vars.RDS_SSM_EC2_INSTANCE_TYPE }}{% endraw %}" >> $GITHUB_ENV
+          fi
+{% endif %}
+{% if config.include_rds %}
+          echo "TF_VAR_rds_instance_class={% raw %}${{ vars.RDS_INSTANCE_CLASS }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_rds_allocated_storage={% raw %}${{ vars.RDS_ALLOCATED_STORAGE }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_postgres_version={% raw %}${{ vars.POSTGRES_VERSION }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_rds_database_name={% raw %}${{ vars.RDS_DATABASE_NAME }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_rds_username={% raw %}${{ vars.RDS_USERNAME }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_rds_storage_type={% raw %}${{ vars.RDS_STORAGE_TYPE }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_rds_skip_final_snapshot={% raw %}${{ vars.RDS_SKIP_FINAL_SNAPSHOT }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_rds_backup_retention_period={% raw %}${{ vars.RDS_BACKUP_RETENTION_PERIOD }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_rds_multi_az={% raw %}${{ vars.RDS_MULTI_AZ }}{% endraw %}" >> $GITHUB_ENV
+{% endif %}
+{% if config.include_ecs %}
+          echo "TF_VAR_ecs_task_cpu={% raw %}${{ vars.ECS_TASK_CPU }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_ecs_task_memory={% raw %}${{ vars.ECS_TASK_MEMORY }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_ecs_service_desired_count={% raw %}${{ vars.ECS_SERVICE_DESIRED_COUNT }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_path_base={% raw %}${{ vars.PATH_BASE }}{% endraw %}" >> $GITHUB_ENV
+{% endif %}
+{% if config.include_alb %}
+          if [ -n "{% raw %}${{ vars.ACM_CERTIFICATE_ARNS }}{% endraw %}" ]; then
+            echo 'TF_VAR_acm_certificate_arns={% raw %}${{ vars.ACM_CERTIFICATE_ARNS }}{% endraw %}' >> $GITHUB_ENV
+          else
+            echo "TF_VAR_acm_certificate_arns=[]" >> $GITHUB_ENV
+          fi
+          if [ -n "{% raw %}${{ vars.API_CERTIFICATE_ARN_INDEX }}{% endraw %}" ]; then
+            echo "TF_VAR_api_certificate_arn_index={% raw %}${{ vars.API_CERTIFICATE_ARN_INDEX }}{% endraw %}" >> $GITHUB_ENV
+          else
+            echo "TF_VAR_api_certificate_arn_index=0" >> $GITHUB_ENV
+          fi
+{% endif %}
+{% if config.include_route53 %}
+          echo "TF_VAR_api_subdomain={% raw %}${{ vars.API_SUBDOMAIN }}{% endraw %}" >> $GITHUB_ENV
+          echo "TF_VAR_route53_zone_name={% raw %}${{ vars.ROUTE53_ZONE_NAME }}{% endraw %}" >> $GITHUB_ENV
+{% endif %}
+
+      - name: Terraform plan
+        run: terraform plan -out=plan.tfplan
+
+      - name: Upload TF plan to S3
+        run: |
+          aws s3 cp plan.tfplan "s3://{% raw %}${{ vars.TF_STATE_BUCKET }}{% endraw %}/terraform-plans/{% raw %}${{ env.ENVIRONMENT }}{% endraw %}/plan-{% raw %}${{ github.run_id }}{% endraw %}.tfplan" --region "{% raw %}${{ env.AWS_REGION }}{% endraw %}"
+
+      - name: Terraform apply
+        run: terraform apply -auto-approve plan.tfplan

@@ -1,0 +1,54 @@
+# Sample environments map for bootstrap_orchestration
+# Replace values with your account-specific names/regions.
+
+environments = {
+{% for env in config.environments %}
+  {{ env }} = {
+    tf_state_key           = "{{ config.project_name }}/{{ env }}.tfstate"
+    aws_region             = "{{ config.aws_region }}"
+{% if config.include_s3_frontend %}
+    s3_bucket_frontend     = "{{ config.project_name }}-{{ env }}-web-app"
+{% else %}
+    s3_bucket_frontend     = ""
+{% endif %}
+{% if config.include_alb %}
+    acm_certificate_arns   = []
+{% if config.include_route53 %}
+    api_subdomain          = "{{ config.dns.api_subdomain | default('api') }}"
+    route53_zone_name      = "{{ config.dns.route53_zone_name | default('example.com') }}"
+{% endif %}
+    api_certificate_arn_index = 0
+{% endif %}
+    project_name           = "{{ config.project_name }}"
+    vpc_cidr               = "{{ config.vpc.vpc_cidr }}"
+    public_subnet_cidr     = "{{ config.vpc.public_subnet_cidr }}"
+    private_subnet_cidr    = "{{ config.vpc.private_subnet_cidr }}"
+{% if config.include_ec2_bastion %}
+    rds_ssm_ec2_instance_type = "t4g.micro"
+{% endif %}
+{% if config.include_rds %}
+    rds_instance_class     = "{{ config.rds.instance_class }}"
+    rds_allocated_storage  = "{{ config.rds.allocated_storage }}"
+    postgres_version       = "{{ config.rds.postgres_version }}"
+    rds_database_name      = "{{ config.rds.database_name }}"
+    rds_username           = "{{ config.rds.username }}"
+    rds_storage_type       = "{{ config.rds.storage_type }}"
+    rds_skip_final_snapshot = "{{ config.rds.skip_final_snapshot | lower }}"
+    rds_backup_retention_period = "{{ config.rds.backup_retention_period }}"
+    rds_multi_az           = "{{ config.rds.multi_az | lower }}"
+{% endif %}
+{% if config.include_ecs %}
+    ecs_task_cpu           = "{{ config.ecs.task_cpu }}"
+    ecs_task_memory        = "{{ config.ecs.task_memory }}"
+    ecs_service_desired_count = "{{ config.ecs.desired_count }}"
+{% endif %}
+    private_2a_cidr        = "10.0.144.0/20"
+    private_2b_cidr        = "10.0.160.0/20"
+    private_app_2a_cidr    = "10.0.176.0/20"
+    private_app_2b_cidr    = "10.0.192.0/20"
+    path_base              = "/{{ config.project_name }}-{{ env }}/api"
+    public_2b_cidr         = "10.0.16.0/24"
+  }
+
+{% endfor %}
+}

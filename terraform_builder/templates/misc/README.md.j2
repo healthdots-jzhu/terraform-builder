@@ -1,0 +1,85 @@
+# {{ config.project_name }}
+
+Auto-generated project scaffold by **terraform-builder**.
+
+## Architecture
+
+| Component | Technology |
+|-----------|-----------|
+| Backend | {{ config.backend_framework.value }} |
+{% if config.include_frontend %}
+| Frontend | {{ config.frontend_framework.value if config.frontend_framework else "N/A" }} |
+{% endif %}
+| Cloud | AWS ({{ config.aws_region }}) |
+| IaC | Terraform |
+| CI/CD | GitHub Actions |
+
+## Enabled AWS Services
+
+{% if config.include_vpc %}- VPC with public/private subnets{% endif %}
+{% if config.include_rds %}- RDS PostgreSQL ({{ config.rds.instance_class }}){% endif %}
+{% if config.include_ecs %}- ECS Fargate ({{ config.ecs.task_cpu }} CPU / {{ config.ecs.task_memory }} MB){% endif %}
+{% if config.include_ecr %}- ECR container registry{% endif %}
+{% if config.include_alb %}- Application Load Balancer{% endif %}
+{% if config.include_route53 %}- Route53 DNS ({{ config.dns.api_subdomain }}.{{ config.dns.route53_zone_name }}){% endif %}
+{% if config.include_kms %}- KMS encryption{% endif %}
+{% if config.include_secrets_manager %}- Secrets Manager{% endif %}
+{% if config.include_ssm %}- SSM Parameter Store{% endif %}
+{% if config.include_cognito %}- Cognito authentication{% endif %}
+{% if config.include_dynamodb_cache %}- DynamoDB cache table{% endif %}
+{% if config.include_ec2_bastion %}- EC2 bastion host{% endif %}
+{% if config.include_scheduler %}- Lambda stop/start scheduler{% endif %}
+{% if config.include_s3_frontend %}- S3 static hosting{% endif %}
+{% if config.include_cloudfront %}- CloudFront CDN{% endif %}
+
+## Environments
+
+{% for env in config.environments %}- `{{ env }}`
+{% endfor %}
+
+## Getting Started
+
+### 1. Provision Terraform Backend
+
+Run the one-time workflow **0.1** to create the S3 state bucket and DynamoDB lock table.
+
+### 2. Set Up CI Role and GitHub Secrets
+
+Run workflow **0.2** to create the OIDC-linked IAM role and populate GitHub environment secrets/variables.
+
+### 3. Deploy Infrastructure
+
+Run workflow **1** to plan and apply the Terraform stack for your chosen environment.
+
+{% if config.include_ecs %}
+### 4. Build and Deploy Backend
+
+Run workflow **2** to build the Docker image, push to ECR, and deploy to ECS.
+{% endif %}
+
+{% if config.include_frontend %}
+### 5. Deploy Frontend
+
+Run workflow **3** to build the frontend, sync to S3, and invalidate CloudFront.
+{% endif %}
+
+## Local Development
+
+```bash
+# Copy environment template
+cp .env.example .env
+
+{% if config.include_ecs %}
+# Run with Docker Compose
+docker compose up --build
+{% endif %}
+```
+
+## Terraform Operations
+
+```bash
+cd terraform
+terraform init
+terraform plan
+terraform apply
+```

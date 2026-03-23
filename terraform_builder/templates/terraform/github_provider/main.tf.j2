@@ -1,0 +1,313 @@
+locals {
+  envs = var.environments
+}
+
+resource "github_repository_environment" "env" {
+  for_each    = local.envs
+  repository  = var.repository
+  environment = each.key
+}
+
+{% if config.include_s3_frontend %}
+resource "github_actions_environment_variable" "s3_bucket_frontend_env" {
+  for_each      = { for k, v in local.envs : k => v if v.s3_bucket_frontend != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "S3_BUCKET_FRONTEND"
+  value         = each.value.s3_bucket_frontend
+  depends_on    = [github_repository_environment.env]
+}
+{% endif %}
+
+resource "github_actions_environment_variable" "tf_state_key_env" {
+  for_each      = { for k, v in local.envs : k => v if v.tf_state_key != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "TF_STATE_KEY"
+  value         = each.value.tf_state_key
+  depends_on    = [github_repository_environment.env]
+}
+
+resource "github_actions_environment_variable" "aws_region_env" {
+  for_each      = { for k, v in local.envs : k => v if v.aws_region != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "AWS_REGION"
+  value         = each.value.aws_region
+  depends_on    = [github_repository_environment.env]
+}
+
+{% if config.include_alb %}
+resource "github_actions_environment_variable" "acm_certificate_arns_env" {
+  for_each      = { for k, v in local.envs : k => v if length(lookup(v, "acm_certificate_arns", [])) > 0 }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "ACM_CERTIFICATE_ARNS"
+  value         = jsonencode(each.value.acm_certificate_arns)
+  depends_on    = [github_repository_environment.env]
+}
+
+resource "github_actions_environment_variable" "api_certificate_arn_index_env" {
+  for_each      = local.envs
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "API_CERTIFICATE_ARN_INDEX"
+  value         = tostring(lookup(each.value, "api_certificate_arn_index", 0))
+  depends_on    = [github_repository_environment.env]
+}
+{% endif %}
+
+resource "github_actions_environment_variable" "project_name_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "project_name", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "PROJECT_NAME"
+  value         = each.value.project_name
+  depends_on    = [github_repository_environment.env]
+}
+
+resource "github_actions_environment_variable" "vpc_cidr_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "vpc_cidr", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "VPC_CIDR"
+  value         = each.value.vpc_cidr
+  depends_on    = [github_repository_environment.env]
+}
+
+resource "github_actions_environment_variable" "public_subnet_cidr_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "public_subnet_cidr", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "PUBLIC_SUBNET_CIDR"
+  value         = each.value.public_subnet_cidr
+  depends_on    = [github_repository_environment.env]
+}
+
+resource "github_actions_environment_variable" "public_2b_cidr_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "public_2b_cidr", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "PUBLIC_2B_CIDR"
+  value         = each.value.public_2b_cidr
+  depends_on    = [github_repository_environment.env]
+}
+
+resource "github_actions_environment_variable" "private_subnet_cidr_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "private_subnet_cidr", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "PRIVATE_SUBNET_CIDR"
+  value         = each.value.private_subnet_cidr
+  depends_on    = [github_repository_environment.env]
+}
+
+resource "github_actions_environment_variable" "private_2a_cidr_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "private_2a_cidr", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "PRIVATE_2A_CIDR"
+  value         = each.value.private_2a_cidr
+  depends_on    = [github_repository_environment.env]
+}
+
+resource "github_actions_environment_variable" "private_2b_cidr_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "private_2b_cidr", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "PRIVATE_2B_CIDR"
+  value         = each.value.private_2b_cidr
+  depends_on    = [github_repository_environment.env]
+}
+
+resource "github_actions_environment_variable" "private_app_2a_cidr_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "private_app_2a_cidr", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "PRIVATE_APP_2A_CIDR"
+  value         = each.value.private_app_2a_cidr
+  depends_on    = [github_repository_environment.env]
+}
+
+resource "github_actions_environment_variable" "private_app_2b_cidr_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "private_app_2b_cidr", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "PRIVATE_APP_2B_CIDR"
+  value         = each.value.private_app_2b_cidr
+  depends_on    = [github_repository_environment.env]
+}
+
+{% if config.include_ec2_bastion %}
+resource "github_actions_environment_variable" "instance_type_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "rds_ssm_ec2_instance_type", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "RDS_SSM_EC2_INSTANCE_TYPE"
+  value         = each.value.rds_ssm_ec2_instance_type
+  depends_on    = [github_repository_environment.env]
+}
+{% endif %}
+
+{% if config.include_rds %}
+resource "github_actions_environment_variable" "rds_instance_class_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "rds_instance_class", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "RDS_INSTANCE_CLASS"
+  value         = each.value.rds_instance_class
+  depends_on    = [github_repository_environment.env]
+}
+
+resource "github_actions_environment_variable" "rds_allocated_storage_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "rds_allocated_storage", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "RDS_ALLOCATED_STORAGE"
+  value         = tostring(each.value.rds_allocated_storage)
+  depends_on    = [github_repository_environment.env]
+}
+
+resource "github_actions_environment_variable" "postgres_version_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "postgres_version", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "POSTGRES_VERSION"
+  value         = each.value.postgres_version
+  depends_on    = [github_repository_environment.env]
+}
+
+resource "github_actions_environment_variable" "rds_database_name_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "rds_database_name", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "RDS_DATABASE_NAME"
+  value         = each.value.rds_database_name
+  depends_on    = [github_repository_environment.env]
+}
+
+resource "github_actions_environment_variable" "rds_username_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "rds_username", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "RDS_USERNAME"
+  value         = each.value.rds_username
+  depends_on    = [github_repository_environment.env]
+}
+
+resource "github_actions_environment_variable" "rds_storage_type_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "rds_storage_type", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "RDS_STORAGE_TYPE"
+  value         = each.value.rds_storage_type
+  depends_on    = [github_repository_environment.env]
+}
+
+resource "github_actions_environment_variable" "rds_skip_final_snapshot_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "rds_skip_final_snapshot", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "RDS_SKIP_FINAL_SNAPSHOT"
+  value         = tostring(each.value.rds_skip_final_snapshot)
+  depends_on    = [github_repository_environment.env]
+}
+
+resource "github_actions_environment_variable" "rds_backup_retention_period_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "rds_backup_retention_period", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "RDS_BACKUP_RETENTION_PERIOD"
+  value         = tostring(each.value.rds_backup_retention_period)
+  depends_on    = [github_repository_environment.env]
+}
+
+resource "github_actions_environment_variable" "rds_multi_az_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "rds_multi_az", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "RDS_MULTI_AZ"
+  value         = tostring(each.value.rds_multi_az)
+  depends_on    = [github_repository_environment.env]
+}
+{% endif %}
+
+{% if config.include_ecs %}
+resource "github_actions_environment_variable" "ecs_task_cpu_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "ecs_task_cpu", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "ECS_TASK_CPU"
+  value         = each.value.ecs_task_cpu
+  depends_on    = [github_repository_environment.env]
+}
+
+resource "github_actions_environment_variable" "ecs_task_memory_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "ecs_task_memory", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "ECS_TASK_MEMORY"
+  value         = each.value.ecs_task_memory
+  depends_on    = [github_repository_environment.env]
+}
+
+resource "github_actions_environment_variable" "ecs_service_desired_count_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "ecs_service_desired_count", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "ECS_SERVICE_DESIRED_COUNT"
+  value         = tostring(each.value.ecs_service_desired_count)
+  depends_on    = [github_repository_environment.env]
+}
+
+resource "github_actions_environment_variable" "path_base_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "path_base", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "PATH_BASE"
+  value         = each.value.path_base
+  depends_on    = [github_repository_environment.env]
+}
+{% endif %}
+
+{% if config.include_route53 %}
+resource "github_actions_environment_variable" "api_subdomain_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "api_subdomain", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "API_SUBDOMAIN"
+  value         = each.value.api_subdomain
+  depends_on    = [github_repository_environment.env]
+}
+
+resource "github_actions_environment_variable" "route53_zone_name_env" {
+  for_each      = { for k, v in local.envs : k => v if lookup(v, "route53_zone_name", "") != "" }
+  repository    = var.repository
+  environment   = each.key
+  variable_name = "ROUTE53_ZONE_NAME"
+  value         = each.value.route53_zone_name
+  depends_on    = [github_repository_environment.env]
+}
+{% endif %}
+
+# Repository-level shared variables
+resource "github_actions_variable" "tf_state_bucket_repo" {
+  count         = var.tf_state_bucket != "" ? 1 : 0
+  repository    = var.repository
+  variable_name = "TF_STATE_BUCKET"
+  value         = var.tf_state_bucket
+}
+
+resource "github_actions_variable" "tf_state_dynamodb_table_repo" {
+  count         = var.tf_state_dynamodb_table != "" ? 1 : 0
+  repository    = var.repository
+  variable_name = "TF_STATE_DYNAMODB_TABLE"
+  value         = var.tf_state_dynamodb_table
+}
+
+resource "github_actions_secret" "repo_aws_role_arn" {
+  count           = var.create_repo_aws_role_secret ? 1 : 0
+  repository      = var.repository
+  secret_name     = "CI_AWS_ROLE_ARN"
+  plaintext_value = var.aws_role_arn
+}

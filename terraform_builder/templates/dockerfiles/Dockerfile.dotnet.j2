@@ -1,0 +1,20 @@
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+
+# Restore dependencies
+COPY ./*.csproj ./
+RUN dotnet restore
+
+# Copy source and publish
+COPY . ./
+RUN dotnet publish -c Release -o /app/publish /p:PublishTrimmed=false
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+WORKDIR /app
+ENV ASPNETCORE_URLS=http://+:{{ config.ecs.container_port }}
+
+COPY --from=build /app/publish ./
+
+EXPOSE {{ config.ecs.container_port }}
+
+ENTRYPOINT ["dotnet", "{{ config.backend_app_path.split('/')[-1] }}.dll"]

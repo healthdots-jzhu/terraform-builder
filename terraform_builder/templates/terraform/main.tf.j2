@@ -1,0 +1,455 @@
+terraform {
+  required_version = ">= 1.5"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+{% if config.include_ssm %}
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
+{% endif %}
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+}
+
+# ─── Data Sources ─────────────────────────────────────────────────────
+data "aws_caller_identity" "current" {}
+data "aws_availability_zones" "available" { state = "available" }
+
+locals {
+  az_a = data.aws_availability_zones.available.names[0]
+  az_b = data.aws_availability_zones.available.names[1]
+  name_prefix = "${var.project_name}-${var.environment}"
+}
+
+# ═══════════════════════════════════════════════════════════════════════
+# VPC & Networking
+# ═══════════════════════════════════════════════════════════════════════
+resource "aws_vpc" "main" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+
+  tags = { Name = "${local.name_prefix}-vpc" }
+
+  lifecycle { prevent_destroy = true }
+}
+
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+  tags   = { Name = "${local.name_prefix}-igw" }
+}
+
+# --- Public Subnets ---
+resource "aws_subnet" "public" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = var.public_subnet_cidr
+  availability_zone       = local.az_a
+  map_public_ip_on_launch = true
+  tags                    = { Name = "${local.name_prefix}-public-a" }
+
+  lifecycle { prevent_destroy = true }
+}
+
+resource "aws_subnet" "public_2b" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = var.public_2b_cidr
+  availability_zone       = local.az_b
+  map_public_ip_on_launch = true
+  tags                    = { Name = "${local.name_prefix}-public-b" }
+
+  lifecycle { prevent_destroy = true }
+}
+
+# --- Private Subnets (for RDS) ---
+resource "aws_subnet" "private_2a" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = var.private_2a_cidr
+  availability_zone = local.az_a
+  tags              = { Name = "${local.name_prefix}-private-2a" }
+
+  lifecycle { prevent_destroy = true }
+}
+
+resource "aws_subnet" "private_2b" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = var.private_2b_cidr
+  availability_zone = local.az_b
+  tags              = { Name = "${local.name_prefix}-private-2b" }
+
+  lifecycle { prevent_destroy = true }
+}
+
+# --- Route Tables ---
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+  tags   = { Name = "${local.name_prefix}-public-rt" }
+}
+
+resource "aws_route" "public_internet" {
+  route_table_id         = aws_route_table.public.id
+  destination_cidr_block = "0.0.0.0/0"
+  gateway_id             = aws_internet_gateway.main.id
+}
+
+resource "aws_route_table_association" "public" {
+  subnet_id      = aws_subnet.public.id
+  route_table_id = aws_route_table.public.id
+}
+
+resource "aws_route_table_association" "public_2b" {
+  subnet_id      = aws_subnet.public_2b.id
+  route_table_id = aws_route_table.public.id
+}
+
+# ═══════════════════════════════════════════════════════════════════════
+# Security Groups
+# ═══════════════════════════════════════════════════════════════════════
+{% if config.include_ec2_bastion %}
+resource "aws_security_group" "ec2" {
+  name_prefix = "${local.name_prefix}-ec2-"
+  vpc_id      = aws_vpc.main.id
+  description = "EC2 bastion host"
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = { Name = "${local.name_prefix}-ec2-sg" }
+}
+{% endif %}
+
+{% if config.include_rds %}
+resource "aws_security_group" "rds" {
+  name_prefix = "${local.name_prefix}-rds-"
+  vpc_id      = aws_vpc.main.id
+  description = "RDS PostgreSQL"
+
+{% if config.include_ec2_bastion %}
+  ingress {
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.ec2.id]
+    description     = "PostgreSQL from EC2 bastion"
+  }
+{% endif %}
+{% if config.include_ecs %}
+  ingress {
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.ecs_tasks.id]
+    description     = "PostgreSQL from ECS tasks"
+  }
+{% endif %}
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = { Name = "${local.name_prefix}-rds-sg" }
+}
+{% endif %}
+
+{% if config.include_ec2_bastion %}
+# ═══════════════════════════════════════════════════════════════════════
+# EC2 Bastion Host (SSM-managed)
+# ═══════════════════════════════════════════════════════════════════════
+data "aws_ami" "amazon_linux" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["amzn2-ami-hvm-*-${local.ec2_arch}-gp2"]
+  }
+}
+
+locals {
+  ec2_arch = can(regex("^t4g", var.rds_ssm_ec2_instance_type)) ? "arm64" : "x86_64"
+}
+
+resource "aws_iam_role" "ec2_ssm_role" {
+  name_prefix = "${var.environment}-${var.project_name}-ec2-ssm-"
+  assume_role_policy = jsonencode({
+    Version   = "2012-10-17"
+    Statement = [{ Effect = "Allow", Principal = { Service = "ec2.amazonaws.com" }, Action = "sts:AssumeRole" }]
+  })
+  tags = { Name = "${local.name_prefix}-ec2-ssm-role" }
+}
+
+resource "aws_iam_role_policy_attachment" "ssm_policy" {
+  role       = aws_iam_role.ec2_ssm_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "ec2_profile" {
+  name_prefix = "${var.environment}-${var.project_name}-ec2-"
+  role        = aws_iam_role.ec2_ssm_role.name
+}
+
+resource "aws_instance" "bastion" {
+  ami                    = data.aws_ami.amazon_linux.id
+  instance_type          = var.rds_ssm_ec2_instance_type
+  subnet_id              = aws_subnet.public.id
+  vpc_security_group_ids = [aws_security_group.ec2.id]
+  iam_instance_profile   = aws_iam_instance_profile.ec2_profile.name
+  monitoring             = true
+
+  user_data = file("${path.module}/user_data.sh")
+
+  tags = { Name = "${local.name_prefix}-bastion" }
+
+  lifecycle {
+    create_before_destroy = true
+    ignore_changes        = [user_data, tags]
+  }
+}
+{% endif %}
+
+{% if config.include_kms %}
+# ═══════════════════════════════════════════════════════════════════════
+# KMS Key
+# ═══════════════════════════════════════════════════════════════════════
+resource "aws_kms_key" "main" {
+  description             = "${local.name_prefix} encryption key"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+
+  tags = { Name = "${local.name_prefix}-kms" }
+
+  lifecycle { prevent_destroy = true }
+}
+
+resource "aws_kms_alias" "main" {
+  name          = "alias/${local.name_prefix}"
+  target_key_id = aws_kms_key.main.key_id
+}
+{% endif %}
+
+{% if config.include_rds %}
+# ═══════════════════════════════════════════════════════════════════════
+# RDS PostgreSQL
+# ═══════════════════════════════════════════════════════════════════════
+resource "aws_db_parameter_group" "postgres" {
+  name_prefix = "${local.name_prefix}-pg-"
+  family      = "postgres${var.postgres_version}"
+  description = "PostgreSQL parameter group"
+
+  parameter {
+    name  = "max_connections"
+    value = "100"
+  }
+}
+
+resource "aws_db_subnet_group" "postgres" {
+  name_prefix = "${local.name_prefix}-"
+  subnet_ids  = [aws_subnet.private_2a.id, aws_subnet.private_2b.id]
+
+  tags = { Name = "${local.name_prefix}-db-subnet-group" }
+
+  lifecycle { prevent_destroy = true }
+}
+
+resource "aws_db_instance" "postgres" {
+  identifier_prefix          = "${local.name_prefix}-pg-"
+  engine                     = "postgres"
+  engine_version             = var.postgres_version
+  instance_class             = var.rds_instance_class
+  allocated_storage          = var.rds_allocated_storage
+  storage_type               = var.rds_storage_type
+  db_name                    = var.rds_database_name
+  username                   = var.rds_username
+  manage_master_user_password = true
+  parameter_group_name       = aws_db_parameter_group.postgres.name
+  db_subnet_group_name       = aws_db_subnet_group.postgres.name
+  vpc_security_group_ids     = [aws_security_group.rds.id]
+  publicly_accessible        = false
+  multi_az                   = var.rds_multi_az
+  skip_final_snapshot        = var.rds_skip_final_snapshot
+  backup_retention_period    = var.rds_backup_retention_period
+{% if config.include_kms %}
+  storage_encrypted          = true
+  kms_key_id                 = aws_kms_key.main.arn
+{% endif %}
+
+  tags = { Name = "${local.name_prefix}-postgres" }
+
+  lifecycle { prevent_destroy = true }
+}
+{% endif %}
+
+{% if config.include_ssm %}
+# ═══════════════════════════════════════════════════════════════════════
+# SSM Parameters
+# ═══════════════════════════════════════════════════════════════════════
+resource "random_password" "hashids_salt" {
+  length  = 32
+  special = false
+}
+
+resource "aws_ssm_parameter" "hashids_salt" {
+  name        = "/${var.environment}/${var.project_name}/hashids/salt"
+  type        = "SecureString"
+{% if config.include_kms %}
+  key_id      = aws_kms_key.main.arn
+{% endif %}
+  value       = random_password.hashids_salt.result
+  description = "Hashids salt for ${local.name_prefix}"
+
+  lifecycle { ignore_changes = [value] }
+}
+{% endif %}
+
+{% if config.include_ecr %}
+# ═══════════════════════════════════════════════════════════════════════
+# ECR Repository
+# ═══════════════════════════════════════════════════════════════════════
+resource "aws_ecr_repository" "app" {
+  name                 = "${var.environment}-${var.project_name}-app"
+  image_tag_mutability = "MUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  tags = { Name = "${local.name_prefix}-ecr" }
+}
+
+resource "aws_ecr_lifecycle_policy" "app_untagged" {
+  repository = aws_ecr_repository.app.name
+
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Expire untagged images older than 30 days"
+      selection = {
+        tagStatus   = "untagged"
+        countType   = "sinceImagePushed"
+        countUnit   = "days"
+        countNumber = 30
+      }
+      action = { type = "expire" }
+    }]
+  })
+}
+{% endif %}
+
+{% if config.include_scheduler %}
+# ═══════════════════════════════════════════════════════════════════════
+# Lambda Scheduler (start/stop resources)
+# ═══════════════════════════════════════════════════════════════════════
+resource "aws_iam_role" "lambda_scheduler" {
+  name_prefix = "${var.environment}-${var.project_name}-lambda-sched-"
+  assume_role_policy = jsonencode({
+    Version   = "2012-10-17"
+    Statement = [{ Effect = "Allow", Principal = { Service = "lambda.amazonaws.com" }, Action = "sts:AssumeRole" }]
+  })
+}
+
+resource "aws_iam_role_policy" "lambda_scheduler" {
+  name = "scheduler-permissions"
+  role = aws_iam_role.lambda_scheduler.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+{% if config.include_ec2_bastion %}
+      {
+        Effect   = "Allow"
+        Action   = ["ec2:StartInstances", "ec2:StopInstances", "ec2:DescribeInstances"]
+        Resource = "*"
+      },
+{% endif %}
+{% if config.include_rds %}
+      {
+        Effect   = "Allow"
+        Action   = ["rds:StartDBInstance", "rds:StopDBInstance", "rds:DescribeDBInstances"]
+        Resource = "*"
+      },
+{% endif %}
+    ]
+  })
+}
+
+data "archive_file" "scheduler_lambda" {
+  type        = "zip"
+  source_file = "${path.module}/lambda/scheduler.py"
+  output_path = "${path.module}/lambda/scheduler.zip"
+}
+
+resource "aws_lambda_function" "scheduler" {
+  function_name    = "${local.name_prefix}-resource-scheduler"
+  role             = aws_iam_role.lambda_scheduler.arn
+  handler          = "scheduler.handler"
+  runtime          = "python3.12"
+  timeout          = 60
+  filename         = data.archive_file.scheduler_lambda.output_path
+  source_code_hash = data.archive_file.scheduler_lambda.output_base64sha256
+
+  environment {
+    variables = {
+{% if config.include_ec2_bastion %}
+      EC2_INSTANCE_ID = aws_instance.bastion.id
+{% endif %}
+{% if config.include_rds %}
+      RDS_INSTANCE_ID = aws_db_instance.postgres.identifier
+{% endif %}
+    }
+  }
+
+  tags = { Name = "${local.name_prefix}-scheduler" }
+}
+
+resource "aws_cloudwatch_event_rule" "stop_resources" {
+  name                = "${local.name_prefix}-stop-resources"
+  description         = "Stop resources on schedule"
+  schedule_expression = "{{ config.scheduler.stop_cron }}"
+}
+
+resource "aws_cloudwatch_event_target" "stop_resources" {
+  rule  = aws_cloudwatch_event_rule.stop_resources.name
+  arn   = aws_lambda_function.scheduler.arn
+  input = jsonencode({ action = "stop" })
+}
+
+resource "aws_lambda_permission" "allow_stop_rule" {
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.scheduler.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.stop_resources.arn
+}
+
+resource "aws_cloudwatch_event_rule" "start_resources" {
+  name                = "${local.name_prefix}-start-resources"
+  description         = "Start resources on schedule"
+  schedule_expression = "{{ config.scheduler.start_cron }}"
+}
+
+resource "aws_cloudwatch_event_target" "start_resources" {
+  rule  = aws_cloudwatch_event_rule.start_resources.name
+  arn   = aws_lambda_function.scheduler.arn
+  input = jsonencode({ action = "start" })
+}
+
+resource "aws_lambda_permission" "allow_start_rule" {
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.scheduler.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.start_resources.arn
+}
+{% endif %}

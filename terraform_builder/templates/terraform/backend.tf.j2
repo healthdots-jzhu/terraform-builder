@@ -1,0 +1,11 @@
+# Terraform S3 backend — supply values via CLI flags at init:
+#   terraform init -reconfigure \
+#     -backend-config="bucket=<your-bucket>" \
+#     -backend-config="key={{ config.project_name }}/terraform.tfstate" \
+#     -backend-config="region={{ config.aws_region }}" \
+#     -backend-config="dynamodb_table=<your-lock-table>" \
+#     -backend-config="encrypt=true"
+
+terraform {
+  backend "s3" {}
+}
